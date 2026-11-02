@@ -1,0 +1,9 @@
+target/
+web/node_modules/
+web/dist/
+*.log
+# video project: dependencies and everything generated (renders, captures, audio)
+video/node_modules/
+video/out/
+video/public/clips/
+video/public/*.wav

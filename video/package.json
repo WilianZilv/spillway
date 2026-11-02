@@ -1,0 +1,34 @@
+{
+  "name": "spillway-video",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Marketing video for spillway (Remotion). Method: timeline-first beats, frame-pure animation, contact-sheet review, synthesized sound on the same timeline.",
+  "scripts": {
+    "studio": "remotion studio",
+    "draft": "remotion render SpillwayVideo out/draft.mp4 --scale=0.5 --crf=28",
+    "render": "remotion render SpillwayVideo out/spillway-silent.mp4",
+    "still": "remotion still SpillwayVideo",
+    "typecheck": "tsc",
+    "demo:draft": "remotion render DemoVideo out/demo-draft.mp4 --scale=0.5 --crf=26",
+    "demo:render": "remotion render DemoVideo out/demo-silent.mp4 --crf=16"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "5.3.0",
+    "@fontsource/instrument-serif": "5.3.0",
+    "@fontsource/jetbrains-mono": "5.3.0",
+    "@remotion/cli": "4.0.529",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "remotion": "4.0.529"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "playwright-core": "^1.56.1",
+    "typescript": "5.9.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

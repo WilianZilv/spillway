@@ -1,0 +1,21 @@
+[Unit]
+Description=spillway master (RAM-first FUSE mount for recordings)
+After=network-online.target local-fs.target remote-fs.target
+Wants=network-online.target
+# Recording writers (MediaMTX) should start after the mount exists:
+#   systemctl edit mediamtx -> [Unit] After=spillway-master.service Requires=spillway-master.service
+Before=mediamtx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/spillway master --config /etc/spillway/spillway.toml
+# SIGTERM: lazy-unmount, then keep flushing RAM to destinations for mover.shutdown_flush_secs
+KillSignal=SIGTERM
+TimeoutStopSec=180
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+Environment=RUST_LOG=info,fuser=error
+
+[Install]
+WantedBy=multi-user.target

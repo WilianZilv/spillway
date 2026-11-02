@@ -1,0 +1,16 @@
+[Unit]
+Description=spillway node (serves this server's destinations to a remote master)
+After=network-online.target remote-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/spillway/node.env
+ExecStart=/usr/local/bin/spillway node
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,28 @@
+[mount]
+path = "/root/spw/videos"
+threads = 16
+
+[ram]
+spool_dir = "/root/spw/ram"
+thief_max_gb = 2.0
+thief_resume_pct = 80.0
+settle_secs = 2.0
+
+[web]
+listen = "0.0.0.0:7070"
+
+[cluster]
+token = "lab-token"
+
+[[destination]]
+id = "disk1"
+path = "/root/spw/d1"
+expect_mount = true
+
+[[destination]]
+id = "disk2"
+path = "/root/spw/d2"
+expect_mount = true
+
+[hooks.moved]
+outbox_dir = "/root/spw/outbox"

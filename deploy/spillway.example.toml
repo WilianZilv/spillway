@@ -1,0 +1,60 @@
+# spillway master — exemplo de configuração
+
+[mount]
+path = "/videos"                 # onde os gravadores escrevem e os players leem
+allow_other = true
+threads = 16                     # threads FUSE
+allowed_extensions = ["mp4", "m4v", "mov"]
+allow_delete_on_dest = false     # apagar pelo mount arquivos que já estão nos discos
+writeback_cache = true           # kernel junta escritas pequenas antes de chegar no spillway
+
+[ram]
+spool_dir = "/run/spillway/ram"  # tmpfs montado pelo próprio spillway
+manage_tmpfs = true
+thief_max_gb = 32.0              # teto: acima disso o thief descarta os pendentes mais antigos
+thief_resume_pct = 80.0          # ... até voltar a 80% do teto
+hard_limit_pct = 110.0           # acima de 110% do teto as escritas recebem ENOSPC
+settle_secs = 3.0                # arquivo fechado e sem escrita por 3 s => pronto
+
+[mover]
+fail_streak = 3                  # falhas seguidas para suspender um destino
+min_rate_mbps = 2.0              # timeout de cada cópia = 30 s + tamanho / taxa
+fsync = false
+avoid_secs = 30.0
+shutdown_flush_secs = 120.0
+pressure_pct = 50.0              # acima de 50% do teto o balanceador usa toda vaga livre
+
+[mp4]
+drop_invalid = false
+
+[web]
+listen = "0.0.0.0:7070"
+token = ""                       # opcional: exige token no painel/API
+
+[cluster]
+token = "troque-este-token"      # nodes usam para se conectar
+local_node_id = "local"
+node_timeout_secs = 6.0
+
+[[destination]]
+id = "disk1"
+node = "local"
+path = "/mnt/disk1"
+expect_mount = true
+
+[[destination]]
+id = "disk2"
+node = "node-b"                  # disco em outro servidor, servido por um spillway node
+path = "/mnt/disk2"
+expect_mount = true
+
+# Hooks: regras da aplicação ficam fora do spillway (ver README).
+[hooks.validate]
+url = ""                         # ex.: "http://127.0.0.1:7090/spillway/validate"
+token = ""
+on_error = "move"
+
+[hooks.moved]
+url = ""                         # ex.: "http://127.0.0.1:7090/spillway/moved"
+token = ""
+outbox_dir = "/var/lib/spillway/outbox"
