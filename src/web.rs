@@ -31,6 +31,12 @@ fn err(status: StatusCode, msg: impl ToString) -> Response {
     (status, Json(json!({ "error": msg.to_string() }))).into_response()
 }
 
+/// Refuses configuration changes when the file is managed by the deploy.
+fn locked(core: &Core) -> Option<Response> {
+    (!core.cfg.read().web.edit_config)
+        .then(|| err(StatusCode::FORBIDDEN, "a configuração é gerenciada pelo arquivo (web.edit_config = false): edite o TOML e reinicie o master"))
+}
+
 #[derive(Serialize)]
 struct RamView {
     #[serde(flatten)]
@@ -69,6 +75,8 @@ struct Overview {
     now_ms: i64,
     mount_path: String,
     spool_dir: String,
+    /// false when the panel may only show the configuration (web.edit_config).
+    config_editable: bool,
     /// Physical memory of the master host (to sanity-check the RAM ceiling).
     host_mem_bytes: u64,
     ram: RamView,
@@ -95,6 +103,7 @@ fn overview(core: &Core) -> Overview {
         now_ms: now_ms(),
         mount_path: cfg.mount.path.display().to_string(),
         spool_dir: cfg.ram.spool_dir.display().to_string(),
+        config_editable: cfg.web.edit_config,
         host_mem_bytes: host_mem_bytes(),
         ram: RamView {
             snap: core.ram.snapshot(),
@@ -260,12 +269,34 @@ where
 struct SettingsView {
     config: MasterConfig,
     config_path_hint: &'static str,
+    /// false: shown read-only (web.edit_config = false).
+    editable: bool,
+    /// Settings that come from environment variables (read-only in the panel).
+    env: Vec<EnvView>,
+    /// Hook tokens that are set (they are never sent to the browser).
+    secrets_set: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+struct EnvView {
+    path: &'static str,
+    var: &'static str,
 }
 
 async fn h_settings_get(State(core): St) -> Response {
     let mut cfg = core.cfg.read().clone();
     cfg.web.token = if cfg.web.token.is_empty() { String::new() } else { "********".into() };
-    Json(SettingsView { config: cfg, config_path_hint: "edited live; persisted to the master's TOML file" }).into_response()
+    let mut secrets_set = Vec::new();
+    for path in ["hooks.validate.token", "hooks.moved.token"] {
+        let t = cfg.secret_mut(path);
+        if !t.is_empty() {
+            t.clear();
+            secrets_set.push(path);
+        }
+    }
+    let env = core.env_secrets.lock().iter().map(|(path, _)| EnvView { path, var: crate::config::env_var_for(path).unwrap_or("?") }).collect();
+    let editable = cfg.web.edit_config;
+    Json(SettingsView { config: cfg, config_path_hint: "edited live; persisted to the master's TOML file", editable, env, secrets_set }).into_response()
 }
 
 /// RFC 7386 JSON merge patch.
@@ -298,6 +329,15 @@ async fn edit_config(core: &Core, f: impl FnOnce(&mut MasterConfig) -> Result<()
 }
 
 async fn h_settings_put(State(core): St, Json(patch): Json<Value>) -> Response {
+    if let Some(r) = locked(&core) {
+        return r;
+    }
+    for (path, _) in core.env_secrets.lock().iter() {
+        if patch.pointer(&format!("/{}", path.replace('.', "/"))).is_some() {
+            let var = crate::config::env_var_for(path).unwrap_or("?");
+            return err(StatusCode::BAD_REQUEST, format!("{path} vem da variável de ambiente {var} e não pode ser alterado pelo painel"));
+        }
+    }
     // destinations and the panel token have their own endpoints / the file
     if patch.get("destination").is_some() || patch.pointer("/web").is_some() {
         return err(StatusCode::BAD_REQUEST, "use /api/destinations for destinations; web settings are file-only");
@@ -331,6 +371,9 @@ async fn h_settings_put(State(core): St, Json(patch): Json<Value>) -> Response {
 // ---------------- destinations ----------------
 
 async fn h_dest_add(State(core): St, Json(d): Json<DestCfg>) -> Response {
+    if let Some(r) = locked(&core) {
+        return r;
+    }
     let id = d.id.clone();
     let resp = edit_config(&core, |cfg| {
         if cfg.destinations.iter().any(|x| x.id == d.id) {
@@ -349,6 +392,9 @@ async fn h_dest_add(State(core): St, Json(d): Json<DestCfg>) -> Response {
 }
 
 async fn h_dest_patch(State(core): St, Path(id): Path<String>, Json(patch): Json<Value>) -> Response {
+    if let Some(r) = locked(&core) {
+        return r;
+    }
     if patch.get("id").is_some_and(|v| v.as_str() != Some(id.as_str())) {
         return err(StatusCode::BAD_REQUEST, "id cannot be changed");
     }
@@ -374,6 +420,9 @@ struct MoveQ {
 }
 
 async fn h_dest_move(State(core): St, Path(id): Path<String>, Query(q): Query<MoveQ>) -> Response {
+    if let Some(r) = locked(&core) {
+        return r;
+    }
     edit_config(&core, |cfg| {
         let Some(i) = cfg.destinations.iter().position(|x| x.id == id) else { return Err(format!("no destination '{id}'")) };
         let d = cfg.destinations.remove(i);
@@ -385,6 +434,9 @@ async fn h_dest_move(State(core): St, Path(id): Path<String>, Query(q): Query<Mo
 }
 
 async fn h_dest_delete(State(core): St, Path(id): Path<String>) -> Response {
+    if let Some(r) = locked(&core) {
+        return r;
+    }
     let resp = edit_config(&core, |cfg| {
         let n = cfg.destinations.len();
         cfg.destinations.retain(|x| x.id != id);

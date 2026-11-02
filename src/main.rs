@@ -48,6 +48,14 @@ enum Cmd {
         #[arg(long, env = "SPILLWAY_ADVERTISE")]
         advertise: String,
     },
+    /// Validate a master config file before deploying it (exit code 1 on errors).
+    Check {
+        #[arg(short, long, env = "SPILLWAY_CONFIG", default_value = "/etc/spillway/spillway.toml")]
+        config: PathBuf,
+        /// Also print the effective configuration (defaults filled in, secrets hidden).
+        #[arg(long)]
+        print: bool,
+    },
     /// Print what the MP4 parser sees in a file (debug helper).
     Inspect { file: PathBuf },
 }
@@ -67,6 +75,12 @@ fn main() -> anyhow::Result<()> {
         Cmd::Node { id, master, token, listen, advertise } => {
             anyhow::ensure!(config::valid_id(&id), "invalid node id");
             rt.block_on(node::run(node::NodeArgs { id, master, token, listen, advertise }))
+        }
+        Cmd::Check { config, print } => {
+            if !config::check(&config, print)? {
+                std::process::exit(1);
+            }
+            Ok(())
         }
         Cmd::Inspect { file } => {
             let t0 = std::time::Instant::now();

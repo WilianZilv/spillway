@@ -156,6 +156,10 @@ pub struct WebCfg {
     pub listen: String,
     /// Optional bearer token for the panel/API. Empty = open.
     pub token: String,
+    /// false: the panel shows the configuration but cannot change it (the
+    /// file is managed by the deploy, e.g. Ansible). Operational actions
+    /// (probe a destination, forget a node) still work.
+    pub edit_config: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,7 +248,7 @@ impl Default for Mp4Cfg {
 
 impl Default for WebCfg {
     fn default() -> Self {
-        WebCfg { listen: "0.0.0.0:7070".into(), token: String::new() }
+        WebCfg { listen: "0.0.0.0:7070".into(), token: String::new(), edit_config: true }
     }
 }
 
@@ -341,18 +345,157 @@ impl MasterConfig {
         Ok(())
     }
 
-    pub fn load(path: &Path) -> Result<Self> {
+    /// Loads the master's file (writing the defaults when there is none),
+    /// then applies secrets from the environment.
+    pub fn load(path: &Path) -> Result<Loaded> {
         if !path.exists() {
-            let cfg = MasterConfig::default();
-            save_atomic(path, &cfg)?;
+            save_atomic(path, &MasterConfig::default())?;
             tracing::info!(path = %path.display(), "wrote default config");
-            return Ok(cfg);
         }
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let cfg: MasterConfig = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        cfg.validate()?;
-        Ok(cfg)
+        read_config(path)
     }
+
+    pub fn secret_mut(&mut self, path: &str) -> &mut String {
+        match path {
+            "web.token" => &mut self.web.token,
+            "cluster.token" => &mut self.cluster.token,
+            "hooks.validate.token" => &mut self.hooks.validate.token,
+            "hooks.moved.token" => &mut self.hooks.moved.token,
+            _ => unreachable!("not a secret: {path}"),
+        }
+    }
+
+    /// Replaces secrets set in the environment; returns each one replaced
+    /// with the value the file had (what must be written back, never the env one).
+    pub fn apply_env(&mut self) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        for (path, var) in ENV_SECRETS {
+            if let Some(v) = std::env::var(var).ok().filter(|v| !v.is_empty()) {
+                let slot = self.secret_mut(path);
+                out.push((path, std::mem::replace(slot, v)));
+            }
+        }
+        out
+    }
+}
+
+/// Secrets that can come from the environment instead of the file, so the
+/// TOML can live in a repository or a config-management tool without them.
+pub const ENV_SECRETS: [(&str, &str); 4] = [
+    ("web.token", "SPILLWAY_WEB_TOKEN"),
+    ("cluster.token", "SPILLWAY_CLUSTER_TOKEN"),
+    ("hooks.validate.token", "SPILLWAY_VALIDATE_TOKEN"),
+    ("hooks.moved.token", "SPILLWAY_MOVED_TOKEN"),
+];
+
+pub fn env_var_for(path: &str) -> Option<&'static str> {
+    ENV_SECRETS.iter().find(|(p, _)| *p == path).map(|(_, v)| *v)
+}
+
+/// A configuration as the master runs it.
+pub struct Loaded {
+    pub cfg: MasterConfig,
+    /// Secrets taken from the environment: (path, value in the file).
+    pub env: Vec<(&'static str, String)>,
+    /// Keys in the file that spillway does not know (typos are otherwise silently ignored).
+    pub unknown: Vec<String>,
+}
+
+/// Reads and validates a config file without creating it.
+pub fn read_config(path: &Path) -> Result<Loaded> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut cfg: MasterConfig = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let unknown = unknown_keys(&text, &cfg)?;
+    let env = cfg.apply_env();
+    cfg.validate()?;
+    Ok(Loaded { cfg, env, unknown })
+}
+
+/// Keys present in `text` that do not exist in the configuration.
+pub fn unknown_keys(text: &str, cfg: &MasterConfig) -> Result<Vec<String>> {
+    fn walk(have: &toml::Value, known: &toml::Value, at: &str, out: &mut Vec<String>) {
+        match (have, known) {
+            (toml::Value::Table(h), toml::Value::Table(k)) => {
+                for (key, v) in h {
+                    let p = if at.is_empty() { key.clone() } else { format!("{at}.{key}") };
+                    match k.get(key) {
+                        Some(kv) => walk(v, kv, &p, out),
+                        None => out.push(p),
+                    }
+                }
+            }
+            (toml::Value::Array(h), toml::Value::Array(k)) => {
+                for (i, v) in h.iter().enumerate() {
+                    if let Some(kv) = k.get(i).or(k.first()) {
+                        walk(v, kv, &format!("{at}[{i}]"), out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let have: toml::Value = toml::from_str(text)?;
+    let known = toml::Value::try_from(cfg)?;
+    let mut out = Vec::new();
+    walk(&have, &known, "", &mut out);
+    Ok(out)
+}
+
+/// `spillway check`: what the master would run with, or why it would not start.
+pub fn check(path: &Path, print: bool) -> Result<bool> {
+    let l = match read_config(path) {
+        Ok(l) => l,
+        Err(e) => {
+            println!("ERRO  {e:#}");
+            return Ok(false);
+        }
+    };
+    let c = &l.cfg;
+    for k in &l.unknown {
+        println!("ERRO  chave desconhecida: {k}");
+    }
+    println!("ok    {}", path.display());
+    println!(
+        "      mount {} · spool {} · teto de RAM {} GiB (rígido {}%)",
+        c.mount.path.display(),
+        c.ram.spool_dir.display(),
+        c.ram.thief_max_gb,
+        c.ram.hard_limit_pct
+    );
+    println!("      painel {} · edição pelo painel {}", c.web.listen, if c.web.edit_config { "ligada" } else { "desligada (arquivo gerenciado)" });
+    for d in &c.destinations {
+        let flags: Vec<_> = [(!d.enabled).then_some("desativado"), d.draining.then_some("só leitura"), d.expect_mount.then_some("exige mount")].into_iter().flatten().collect();
+        println!(
+            "      destino {} → {}:{} · peso ×{} · até {}% · {} cópias{}",
+            d.id,
+            d.node,
+            d.path,
+            d.weight,
+            d.max_use_pct,
+            d.max_inflight,
+            if flags.is_empty() { String::new() } else { format!(" · {}", flags.join(", ")) }
+        );
+    }
+    for (name, url) in [("validate", &c.hooks.validate.url), ("moved", &c.hooks.moved.url)] {
+        println!("      hook {name}: {}", if url.is_empty() { "desligado" } else { url });
+    }
+    for (path, _) in &l.env {
+        println!("      {path} vem de {}", env_var_for(path).unwrap_or("?"));
+    }
+    if c.cluster.token == ClusterCfg::default().token {
+        println!("AVISO cluster.token ainda é o padrão; defina um ou use SPILLWAY_CLUSTER_TOKEN");
+    }
+    if print {
+        let mut shown = c.clone();
+        for (p, _) in ENV_SECRETS {
+            let s = shown.secret_mut(p);
+            if !s.is_empty() {
+                *s = "********".into();
+            }
+        }
+        println!("\n# configuração efetiva (padrões preenchidos, segredos ocultos)\n{}", toml::to_string_pretty(&shown)?);
+    }
+    Ok(l.unknown.is_empty())
 }
 
 impl DestCfg {
@@ -434,10 +577,32 @@ mod tests {
 
     #[test]
     fn example_config_parses() {
-        let c: MasterConfig = toml::from_str(include_str!("../deploy/spillway.example.toml")).unwrap();
+        let text = include_str!("../deploy/spillway.example.toml");
+        let c: MasterConfig = toml::from_str(text).unwrap();
         c.validate().unwrap();
+        assert_eq!(unknown_keys(text, &c).unwrap(), Vec::<String>::new(), "the example documents only real options");
         assert_eq!(c.destinations.len(), 2);
         assert!(c.hooks.validate.url.is_empty());
+    }
+
+    #[test]
+    fn unknown_keys_are_reported() {
+        let text = "[ram]\nthief_max_bg = 64\n[web]\nedit_config = false\n[[destination]]\nid='a'\npath='/a'\nwieght=2\n[typo]\nx=1\n";
+        let c: MasterConfig = toml::from_str(text).unwrap();
+        assert!(!c.web.edit_config);
+        assert_eq!(unknown_keys(text, &c).unwrap(), vec!["destination[0].wieght", "ram.thief_max_bg", "typo"]);
+    }
+
+    #[test]
+    fn secrets_from_env_are_not_written_back() {
+        let mut c = MasterConfig::default();
+        c.cluster.token = "from-file".into();
+        // SAFETY: no other test reads this variable
+        unsafe { std::env::set_var("SPILLWAY_CLUSTER_TOKEN", "from-env") };
+        let env = c.apply_env();
+        unsafe { std::env::remove_var("SPILLWAY_CLUSTER_TOKEN") };
+        assert_eq!(c.cluster.token, "from-env");
+        assert_eq!(env, vec![("cluster.token", "from-file".to_string())]);
     }
 
     #[test]

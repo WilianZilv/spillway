@@ -1,60 +1,96 @@
-# spillway master — exemplo de configuração
+# spillway master — configuração de referência
+#
+# Tudo o que o painel altera vive neste arquivo: dá para entregar o serviço
+# já configurado. Valide antes de subir:
+#
+#   spillway check -c /etc/spillway/spillway.toml          # erros e resumo
+#   spillway check -c /etc/spillway/spillway.toml --print  # config efetiva
+#
+# Chaves desconhecidas (erro de digitação) são apontadas pelo `check` e
+# avisadas no painel ao iniciar. Valores omitidos usam o padrão mostrado aqui.
+#
+# Segredos podem vir do ambiente em vez do arquivo (o painel nunca os grava aqui):
+#   SPILLWAY_WEB_TOKEN, SPILLWAY_CLUSTER_TOKEN,
+#   SPILLWAY_VALIDATE_TOKEN, SPILLWAY_MOVED_TOKEN
+#
+# Atenção: com web.edit_config = true, salvar pelo painel reescreve este
+# arquivo e os comentários se perdem.
 
 [mount]
 path = "/videos"                 # onde os gravadores escrevem e os players leem
-allow_other = true
+allow_other = true               # outros usuários (ex.: o do gravador) acessam o mount
 threads = 16                     # threads FUSE
-allowed_extensions = ["mp4", "m4v", "mov"]
-allow_delete_on_dest = false     # apagar pelo mount arquivos que já estão nos discos
-writeback_cache = true           # kernel junta escritas pequenas antes de chegar no spillway
+allowed_extensions = ["mp4", "m4v", "mov"]   # vazio aceita qualquer extensão
+allow_delete_on_dest = false     # permitir apagar pelo mount arquivos que já estão nos discos
+writeback_cache = true           # o kernel junta escritas pequenas antes de chegarem ao spillway
 
 [ram]
-spool_dir = "/run/spillway/ram"  # tmpfs montado pelo próprio spillway
-manage_tmpfs = true
+spool_dir = "/run/spillway/ram"  # tmpfs onde as escritas caem primeiro
+manage_tmpfs = true              # o spillway monta e redimensiona esse tmpfs
 thief_max_gb = 32.0              # teto: acima disso o thief descarta os pendentes mais antigos
-thief_resume_pct = 80.0          # ... até voltar a 80% do teto
+thief_resume_pct = 80.0          # ... até a RAM voltar a 80% do teto
 hard_limit_pct = 110.0           # acima de 110% do teto as escritas recebem ENOSPC
-settle_secs = 3.0                # arquivo fechado e sem escrita por 3 s => pronto
+settle_secs = 3.0                # fechado e sem escrita por 3 s => pronto para mover
 
 [mover]
-fail_streak = 3                  # falhas seguidas para suspender um destino
-min_rate_mbps = 2.0              # timeout de cada cópia = 30 s + tamanho / taxa
-fsync = false
-avoid_secs = 30.0
-shutdown_flush_secs = 120.0
+fail_streak = 3                  # falhas de cópia seguidas para suspender um destino
+min_rate_mbps = 2.0              # timeout de cada cópia = 30 s + tamanho / esta taxa
+fsync = false                    # fsync após cada cópia (mais seguro contra queda de energia, mais lento)
+avoid_secs = 30.0                # um arquivo que falhou num destino tenta outro por este tempo
+shutdown_flush_secs = 120.0      # ao parar, quanto tempo continuar esvaziando a RAM
 pressure_pct = 50.0              # acima de 50% do teto o balanceador usa toda vaga livre
 
 [mp4]
-drop_invalid = false
+drop_invalid = false             # apagar em vez de mover arquivos que falham no parse
 
 [web]
-listen = "0.0.0.0:7070"
-token = ""                       # opcional: exige token no painel/API
+listen = "0.0.0.0:7070"          # painel e API (reinício necessário)
+token = ""                       # opcional: exige este token no painel/API (ou SPILLWAY_WEB_TOKEN)
+edit_config = true               # false: painel só mostra a configuração (arquivo gerenciado pelo deploy)
 
 [cluster]
-token = "troque-este-token"      # nodes usam para se conectar
-local_node_id = "local"
-node_timeout_secs = 6.0
+token = "troque-este-token"      # os nodes usam para se conectar (ou SPILLWAY_CLUSTER_TOKEN)
+local_node_id = "local"          # id do node embutido no master (destinos locais)
+node_timeout_secs = 6.0          # node sem heartbeat por este tempo => offline
 
+# Hooks: as regras da aplicação ficam fora do spillway (ver README).
+[hooks.validate]                 # antes de mover: move / drop / hold
+url = ""                         # vazio desliga; ex.: "http://127.0.0.1:7090/spillway/validate"
+token = ""                       # Authorization: Bearer (ou SPILLWAY_VALIDATE_TOKEN)
+batch_max = 256                  # o lote sai ao juntar 256 arquivos...
+batch_wait_ms = 50               # ...ou quando o mais antigo esperou 50 ms
+inflight = 4                     # lotes em voo ao mesmo tempo
+timeout_ms = 2000
+on_error = "move"                # erro/timeout: "move" (fail-open) ou "hold"
+hold_retry_ms = 5000             # espera antes de perguntar de novo por um "hold" sem prazo
+
+[hooks.moved]                    # depois de mover: aviso durável (outbox em disco)
+url = ""                         # vazio desliga; ex.: "http://127.0.0.1:7090/spillway/moved"
+token = ""                       # Authorization: Bearer (ou SPILLWAY_MOVED_TOKEN)
+batch_max = 500
+batch_wait_ms = 1000
+timeout_ms = 5000
+outbox_dir = "/var/lib/spillway/outbox"   # fora do tmpfs (reinício necessário para mudar)
+
+# Destinos: a ordem é a prioridade de busca nas leituras.
 [[destination]]
 id = "disk1"
-node = "local"
+node = "local"                   # "local" = este servidor; outro id = um spillway node
 path = "/mnt/disk1"
-expect_mount = true
+weight = 1.0                     # multiplicador sobre o espaço livre no balanceamento
+max_use_pct = 95.0               # acima deste uso o destino para de receber
+max_inflight = 4                 # cópias simultâneas para este destino
+enabled = true                   # false: nem recebe nem é lido
+draining = false                 # true: só leitura (serve arquivos, não recebe novos)
+expect_mount = true              # recusa gravar se o caminho não for um ponto de montagem
 
 [[destination]]
 id = "disk2"
 node = "node-b"                  # disco em outro servidor, servido por um spillway node
 path = "/mnt/disk2"
+weight = 1.0
+max_use_pct = 95.0
+max_inflight = 4
+enabled = true
+draining = false
 expect_mount = true
-
-# Hooks: regras da aplicação ficam fora do spillway (ver README).
-[hooks.validate]
-url = ""                         # ex.: "http://127.0.0.1:7090/spillway/validate"
-token = ""
-on_error = "move"
-
-[hooks.moved]
-url = ""                         # ex.: "http://127.0.0.1:7090/spillway/moved"
-token = ""
-outbox_dir = "/var/lib/spillway/outbox"

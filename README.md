@@ -120,6 +120,19 @@ sudo systemctl enable --now spillway-master
 
 Precisa de `fuse3` (`fusermount3`) e de rodar como root (monta tmpfs e FUSE com `allow_other`).
 
+### Configuração no deploy
+
+Tudo o que o painel altera fica no TOML do master: entregue o arquivo pronto e o serviço sobe configurado. [`deploy/spillway.example.toml`](deploy/spillway.example.toml) documenta todas as opções com os padrões.
+
+```bash
+spillway check -c /etc/spillway/spillway.toml          # valida; aponta chaves desconhecidas (erro de digitação)
+spillway check -c /etc/spillway/spillway.toml --print  # mostra a configuração efetiva, segredos ocultos
+```
+
+* **Arquivo gerenciado** (Ansible, repositório de configs): `[web] edit_config = false` deixa o painel só mostrando a configuração; mudanças vêm do arquivo + reinício. Testar destino e esquecer node continuam funcionando.
+* **Segredos fora do arquivo**: `SPILLWAY_WEB_TOKEN`, `SPILLWAY_CLUSTER_TOKEN`, `SPILLWAY_VALIDATE_TOKEN` e `SPILLWAY_MOVED_TOKEN` substituem os tokens do TOML. O painel mostra esses campos como definidos pelo ambiente, não deixa editá-los e nunca os grava no arquivo. Os tokens dos hooks não são enviados ao navegador.
+* Com `edit_config = true`, salvar pelo painel reescreve o arquivo (os comentários se perdem).
+
 ### Conectar um node (outro servidor)
 
 ```bash
@@ -148,7 +161,7 @@ Desenvolvimento do painel: `cd web && SPILLWAY_MASTER=http://localhost:7070 pnpm
 
 ```bash
 cargo test --release                 # unitários
-sudo python3 tests/e2e.py            # 24 cenários end-to-end com mount real
+sudo python3 tests/e2e.py            # 25 cenários end-to-end com mount real
 ```
 
 Os cenários E2E rodam como root no Linux (precisam de `fuse3`, `python3` e `ffmpeg`) e usam três filesystems ext4 em loop como destinos e um node remoto real. Usam o binário de `target/release`; `SPILLWAY_BIN` aponta para outro.
@@ -169,6 +182,7 @@ Os cenários E2E rodam como root no Linux (precisam de `fuse3`, `python3` e `ffm
 | burstmoved | 3000 arquivos em 8 s com node remoto e hook moved: nenhum destino cai, nenhuma escrita espera mais que 1,5 s |
 | fspanic | erro interno (panic) numa operação do mount vira EIO só naquela chamada; o mount segue no ar |
 | underlay | mount fora, o gravador escreve na pasta local embaixo dele: ao voltar, os arquivos são resgatados e movidos |
+| deployconfig | `check` acha chave errada; `edit_config = false` bloqueia toda mudança pelo painel; tokens do ambiente valem, não vão ao navegador nem ao arquivo |
 | extchanges | arquivo apagado ou movido direto no disco (local e remoto): some do mount em até 2,5 s; leitura segue o arquivo, mesmo com ele aberto |
 | crash | `kill -9` no master com arquivos na RAM → recuperados e movidos |
 | stop | `SIGTERM` esvazia a RAM antes de sair |

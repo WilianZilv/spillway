@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ArrowDownToLine, Ban, ChevronDown, ChevronUp, CircleCheck, HardDrive, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { ArrowDownToLine, Ban, ChevronDown, ChevronUp, CircleCheck, FileLock2, HardDrive, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   AlertDialog,
@@ -178,16 +178,22 @@ function DestCard({ d, ov, i, n, onEdit, onRemove }: { d: DestView; ov: Overview
         <Button variant="outline" size="sm" onClick={probe}>
           <RefreshCw /> Testar agora
         </Button>
-        <Button variant="outline" size="sm" onClick={onEdit}>
-          <Pencil /> Editar
-        </Button>
-        <Button variant="outline" size="sm" onClick={() => patch({ enabled: !d.enabled }, d.enabled ? 'Destino desativado' : 'Destino ativado')}>
-          {d.enabled ? <Ban /> : <CircleCheck />} {d.enabled ? 'Desativar' : 'Ativar'}
-        </Button>
-        <Button variant="outline" size="sm" onClick={() => patch({ draining: !d.draining }, d.draining ? 'Destino voltou a gravar' : 'Destino em só leitura')}>
-          <ArrowDownToLine /> {d.draining ? 'Voltar a gravar' : 'Só leitura'}
-        </Button>
+        {ov.config_editable && (
+          <>
+            <Button variant="outline" size="sm" onClick={onEdit}>
+              <Pencil /> Editar
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => patch({ enabled: !d.enabled }, d.enabled ? 'Destino desativado' : 'Destino ativado')}>
+              {d.enabled ? <Ban /> : <CircleCheck />} {d.enabled ? 'Desativar' : 'Ativar'}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => patch({ draining: !d.draining }, d.draining ? 'Destino voltou a gravar' : 'Destino em só leitura')}>
+              <ArrowDownToLine /> {d.draining ? 'Voltar a gravar' : 'Só leitura'}
+            </Button>
+          </>
+        )}
         <span className="flex-1" />
+        {ov.config_editable && (
+          <>
         <Tooltip>
           <TooltipTrigger render={<Button variant="ghost" size="icon-sm" disabled={i === 0} onClick={() => move(i - 1)} aria-label="Subir na ordem" />}>
             <ChevronUp />
@@ -203,8 +209,19 @@ function DestCard({ d, ov, i, n, onEdit, onRemove }: { d: DestView; ov: Overview
         <Button variant="destructive" size="sm" onClick={onRemove}>
           <Trash2 /> Remover
         </Button>
+          </>
+        )}
       </CardFooter>
     </Card>
+  )
+}
+
+/** Shown instead of the edit controls when the deploy manages the config file. */
+export function ManagedBadge() {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-lg border bg-muted px-2.5 py-1.5 text-sm text-muted-foreground" title="web.edit_config = false: altere o arquivo TOML e reinicie o master">
+      <FileLock2 className="size-4" /> Configuração gerenciada pelo arquivo
+    </span>
   )
 }
 
@@ -214,9 +231,13 @@ export function Destinations({ ov, series, range, setRange }: { ov: Overview; se
   return (
     <div>
       <PageHeader title="Destinos" sub="Arquivos selados vão para os destinos saudáveis, na proporção do espaço livre. A ordem define a prioridade de busca nas leituras.">
-        <Button onClick={() => setDialog({ open: true, edit: null })}>
-          <Plus /> Adicionar destino
-        </Button>
+        {ov.config_editable ? (
+          <Button onClick={() => setDialog({ open: true, edit: null })}>
+            <Plus /> Adicionar destino
+          </Button>
+        ) : (
+          <ManagedBadge />
+        )}
       </PageHeader>
       {ov.dests.length ? (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
@@ -228,9 +249,11 @@ export function Destinations({ ov, series, range, setRange }: { ov: Overview; se
         <Card>
           <Empty icon={HardDrive}>
             Nenhum destino configurado
-            <Button size="sm" onClick={() => setDialog({ open: true, edit: null })}>
-              <Plus /> Adicionar destino
-            </Button>
+            {ov.config_editable && (
+              <Button size="sm" onClick={() => setDialog({ open: true, edit: null })}>
+                <Plus /> Adicionar destino
+              </Button>
+            )}
           </Empty>
         </Card>
       )}

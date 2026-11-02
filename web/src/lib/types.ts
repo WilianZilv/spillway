@@ -139,6 +139,7 @@ export interface HooksView {
 
 export interface Overview {
   version: string
+  config_editable: boolean
   hostname: string
   started_ms: number
   now_ms: number
@@ -228,7 +229,7 @@ export interface MasterConfig {
     validate: { url: string; token: string; batch_max: number; batch_wait_ms: number; inflight: number; timeout_ms: number; on_error: 'move' | 'hold'; hold_retry_ms: number }
     moved: { url: string; token: string; batch_max: number; batch_wait_ms: number; timeout_ms: number; outbox_dir: string }
   }
-  web: { listen: string; token: string }
+  web: { listen: string; token: string; edit_config: boolean }
   cluster: { token: string; local_node_id: string; node_timeout_secs: number }
   destination: DestCfg[]
 }

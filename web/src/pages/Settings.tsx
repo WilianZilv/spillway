@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Pencil, Save, TriangleAlert, Undo2 } from 'lucide-react'
+import { FileLock2, Pencil, Save, TriangleAlert, Undo2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -84,24 +84,32 @@ function diff(a: unknown, b: unknown): Obj | undefined {
   return Object.keys(out).length ? out : undefined
 }
 
-function FieldInput({ f, form, set }: { f: Field; form: Form; set: (path: string[], v: unknown) => void }) {
+/** What the master says about the config besides its values. */
+type Meta = { editable: boolean; env: { path: string; var: string }[]; secrets_set: string[] }
+
+function FieldInput({ f, form, set, meta }: { f: Field; form: Form; set: (path: string[], v: unknown) => void; meta: Meta }) {
   const id = `s-${f.path.join('-')}`
   const v = getAt(form, f.path)
+  const key = f.path.join('.')
+  const envVar = meta.env.find((e) => e.path === key)?.var
+  const disabled = !meta.editable || !!envVar
+  const hint = envVar ? `Definido pela variável de ambiente ${envVar}.` : f.hint
+  const placeholder = f.type === 'secret' && meta.secrets_set.includes(key) ? 'definido (digite para trocar)' : f.placeholder
   if (f.type === 'bool')
     return (
       <div className="grid content-start gap-1.5">
         <Label htmlFor={id} className="flex items-center gap-2.5">
-          <Switch id={id} checked={!!v} onCheckedChange={(c) => set(f.path, c)} />
+          <Switch id={id} checked={!!v} disabled={disabled} onCheckedChange={(c) => set(f.path, c)} />
           {f.label}
         </Label>
-        <span className="text-xs text-muted-foreground">{f.hint}</span>
+        <span className="text-xs text-muted-foreground">{hint}</span>
       </div>
     )
   if (f.type === 'select')
     return (
       <div className="grid content-start gap-1.5">
         <Label>{f.label}</Label>
-        <Select items={f.options} value={String(v ?? '')} onValueChange={(x) => x && set(f.path, x)}>
+        <Select items={f.options} value={String(v ?? '')} disabled={disabled} onValueChange={(x) => x && set(f.path, x)}>
           <SelectTrigger className="w-full">
             <SelectValue />
           </SelectTrigger>
@@ -113,7 +121,7 @@ function FieldInput({ f, form, set }: { f: Field; form: Form; set: (path: string
             ))}
           </SelectContent>
         </Select>
-        <span className="text-xs text-muted-foreground">{f.hint}</span>
+        <span className="text-xs text-muted-foreground">{hint}</span>
       </div>
     )
   const val = f.type === 'list' ? ((v as string[]) ?? []).join(', ') : String(v ?? '')
@@ -125,10 +133,11 @@ function FieldInput({ f, form, set }: { f: Field; form: Form; set: (path: string
           id={id}
           type={f.type === 'number' ? 'number' : f.type === 'secret' ? 'password' : 'text'}
           autoComplete="off"
+          disabled={disabled}
           min={f.min}
           max={f.max}
           step={f.step}
-          placeholder={f.placeholder}
+          placeholder={placeholder}
           className={f.unit ? 'rounded-r-none' : f.type !== 'number' ? 'font-mono' : ''}
           value={val}
           onChange={(e) => {
@@ -150,7 +159,7 @@ function FieldInput({ f, form, set }: { f: Field; form: Form; set: (path: string
         />
         {f.unit && <span className="grid place-items-center rounded-r-lg border border-l-0 bg-muted px-2.5 text-xs whitespace-nowrap text-muted-foreground">{f.unit}</span>}
       </div>
-      <span className="text-xs text-muted-foreground">{f.hint}</span>
+      <span className="text-xs text-muted-foreground">{hint}</span>
     </div>
   )
 }
@@ -159,11 +168,13 @@ export function Settings({ ov }: { ov: Overview }) {
   const [saved, setSaved] = useState<Form | null>(null)
   const [form, setForm] = useState<Form | null>(null)
   const [busy, setBusy] = useState(false)
+  const [meta, setMeta] = useState<Meta>({ editable: true, env: [], secrets_set: [] })
 
   const load = async () => {
-    const s = await api<{ config: MasterConfig }>('/api/settings')
+    const s = await api<{ config: MasterConfig } & Meta>('/api/settings')
     setSaved(s.config)
     setForm(structuredClone(s.config))
+    setMeta({ editable: s.editable, env: s.env, secrets_set: s.secrets_set })
   }
   useEffect(() => {
     load().catch(() => {})
@@ -203,7 +214,7 @@ export function Settings({ ov }: { ov: Overview }) {
       </CardHeader>
       <CardContent className="grid grid-cols-1 gap-x-6 gap-y-5 sm:grid-cols-2 xl:grid-cols-3">
         {FIELDS.filter((f) => prefixes.includes(f.path.slice(0, -1).join('.'))).map((f) => (
-          <FieldInput key={f.path.join('.')} f={f} form={form} set={set} />
+          <FieldInput key={f.path.join('.')} f={f} form={form} set={set} meta={meta} />
         ))}
       </CardContent>
     </Card>
@@ -211,18 +222,30 @@ export function Settings({ ov }: { ov: Overview }) {
 
   return (
     <div>
-      <PageHeader title="Configurações" sub="Aplicadas na hora e gravadas no arquivo TOML do master.">
-        {dirty && (
+      <PageHeader
+        title="Configurações"
+        sub={meta.editable ? 'Aplicadas na hora e gravadas no arquivo TOML do master.' : 'Gerenciadas pelo arquivo TOML do master (web.edit_config = false): para mudar, edite o arquivo e reinicie.'}
+      >
+        {!meta.editable && (
+          <span className="inline-flex items-center gap-1.5 rounded-lg border bg-muted px-2.5 py-1.5 text-sm text-muted-foreground">
+            <FileLock2 className="size-4" /> Somente leitura
+          </span>
+        )}
+        {meta.editable && dirty && (
           <span className="inline-flex items-center gap-1.5 text-sm text-warning-fg">
             <Pencil className="size-4" /> Alterações não salvas
           </span>
         )}
-        <Button variant="outline" disabled={!dirty} onClick={() => setForm(structuredClone(saved))}>
-          <Undo2 /> Descartar
-        </Button>
-        <Button disabled={!dirty || busy} onClick={save}>
-          <Save /> Salvar
-        </Button>
+        {meta.editable && (
+          <>
+            <Button variant="outline" disabled={!dirty} onClick={() => setForm(structuredClone(saved))}>
+              <Undo2 /> Descartar
+            </Button>
+            <Button disabled={!dirty || busy} onClick={save}>
+              <Save /> Salvar
+            </Button>
+          </>
+        )}
       </PageHeader>
 
       <div className="grid gap-4">
@@ -236,9 +259,9 @@ export function Settings({ ov }: { ov: Overview }) {
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-[minmax(0,1fr)_180px] items-center gap-5">
-              <Slider min={0.5} max={sliderMax} step={0.5} value={r.thief_max_gb} onValueChange={(v) => set(['ram', 'thief_max_gb'], Array.isArray(v) ? v[0] : v)} aria-label="Teto de RAM" />
+              <Slider min={0.5} max={sliderMax} step={0.5} disabled={!meta.editable} value={r.thief_max_gb} onValueChange={(v) => set(['ram', 'thief_max_gb'], Array.isArray(v) ? v[0] : v)} aria-label="Teto de RAM" />
               <div className="flex">
-                <Input type="number" min={0.1} step={0.1} value={r.thief_max_gb} onChange={(e) => set(['ram', 'thief_max_gb'], +e.target.value)} className="rounded-r-none" aria-label="Teto em GiB" />
+                <Input type="number" min={0.1} step={0.1} disabled={!meta.editable} value={r.thief_max_gb} onChange={(e) => set(['ram', 'thief_max_gb'], +e.target.value)} className="rounded-r-none" aria-label="Teto em GiB" />
                 <span className="grid place-items-center rounded-r-lg border border-l-0 bg-muted px-2.5 text-xs text-muted-foreground">GiB</span>
               </div>
             </div>

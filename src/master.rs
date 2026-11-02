@@ -34,6 +34,9 @@ pub struct ThiefState {
 pub struct Core {
     pub cfg: RwLock<MasterConfig>,
     cfg_path: PathBuf,
+    /// Secrets that came from the environment: (path, value in the file).
+    /// The file keeps its own value; the env one is never written to disk.
+    pub env_secrets: Mutex<Vec<(&'static str, String)>>,
     pub ram: Ram,
     pub cluster: Arc<Cluster>,
     pub stats: Arc<Stats>,
@@ -77,6 +80,7 @@ impl Core {
             ram: Ram::new(cfg.ram.spool_dir.clone()),
             cfg: RwLock::new(cfg),
             cfg_path,
+            env_secrets: Mutex::new(Vec::new()),
             cluster,
             stats,
             locs: LocCache::default(),
@@ -120,7 +124,11 @@ impl Core {
         for removed in prev.destinations.iter().filter(|d| !next.destinations.iter().any(|n| n.id == d.id)) {
             self.locs.invalidate_dest(&removed.id);
         }
-        save_atomic(&self.cfg_path, &next)?;
+        let mut to_disk = next.clone();
+        for (path, file_value) in self.env_secrets.lock().iter() {
+            *to_disk.secret_mut(path) = file_value.clone();
+        }
+        save_atomic(&self.cfg_path, &to_disk)?;
         *self.cfg.write() = next.clone();
         self.apply_runtime(&next);
         self.locs.clear_negative();
@@ -662,9 +670,18 @@ pub fn lazy_unmount(path: &Path) {
 }
 
 pub async fn run(cfg_path: PathBuf) -> Result<()> {
-    let cfg = MasterConfig::load(&cfg_path)?;
+    let loaded = MasterConfig::load(&cfg_path)?;
+    let cfg = loaded.cfg.clone();
     ensure_spool(&cfg)?;
     let core = Core::new(cfg.clone(), cfg_path);
+    *core.env_secrets.lock() = loaded.env.clone();
+    for (path, _) in &loaded.env {
+        tracing::info!(setting = path, var = crate::config::env_var_for(path).unwrap_or("?"), "secret taken from the environment");
+    }
+    if !loaded.unknown.is_empty() {
+        tracing::warn!(keys = ?loaded.unknown, "unknown keys in the config file (ignored)");
+        core.stats.event("warn", "config_unknown_keys", format!("Chaves desconhecidas no arquivo de configuração foram ignoradas: {}", loaded.unknown.join(", ")));
+    }
     let (files, bytes) = core.ram.recover(Duration::from_secs_f64(cfg.ram.settle_secs)).context("scanning spool")?;
     if files > 0 {
         core.stats.event("warn", "spool_recovered", format!("{files} arquivos ({}) recuperados da RAM de uma execução anterior", fmt_bytes(bytes)));

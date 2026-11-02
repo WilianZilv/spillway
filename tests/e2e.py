@@ -208,10 +208,10 @@ def wipe_dests():
                 shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
 
 
-def start_master(thief_gb=1.0, wait_healthy=True):
+def start_master(thief_gb=1.0, wait_healthy=True, extra_env=None):
     global master_proc
     log = open(f"{LAB}/e2e-master.log", "ab")
-    env = {**os.environ, "SPILLWAY_FAULT_PANIC_NAME": FAULT_NAME}
+    env = {**os.environ, "SPILLWAY_FAULT_PANIC_NAME": FAULT_NAME, **(extra_env or {})}
     master_proc = subprocess.Popen([BIN, "master", "-c", f"{LAB}/e2e.toml"], stdout=log, stderr=log, start_new_session=True, env=env)
     wait(lambda: sh(f"mountpoint -q {MNT} && echo y || echo n") == "y", 15, "mount up")
     wait(lambda: api("/healthz") == "ok", 10, "api up")
@@ -854,6 +854,62 @@ def s_underlay_rescue():
     return f"{len(local) + 1} segments written to the local disk during the downtime (one still open at restart) were rescued and moved"
 
 
+def api_status(path, method="GET", body=None):
+    """HTTP status of an API call (errors included)."""
+    try:
+        api(path, method, body)
+        return 200
+    except RuntimeError as e:  # api() reports "METHOD path -> CODE: body"
+        return int(str(e).split(" -> ", 1)[1].split(":", 1)[0])
+
+
+def s_deploy_config():
+    """Config managed by the deploy: `check` catches typos, edit_config=false locks the panel, secrets come from env and never reach the file."""
+    cfg_path = f"{LAB}/e2e.toml"
+    base = CONFIG.format(mnt=MNT, spool=SPOOL, lab=LAB, token=TOKEN, thief=1.0)  # not the file: the panel may have rewritten it
+    managed = base.replace("[web]\n", "[web]\nedit_config = false\n").replace("[ram]\n", "[ram]\nthief_max_bg = 9\n")
+    managed += '\n[hooks.validate]\ntoken = "file-token"\n'
+    open(cfg_path, "w").write(managed)
+    r = subprocess.run([BIN, "check", "-c", cfg_path], capture_output=True, text=True)
+    check(r.returncode == 1 and "chave desconhecida: ram.thief_max_bg" in r.stdout, f"check flags the typo: {r.stdout[-300:]}")
+    open(cfg_path, "w").write(managed.replace("thief_max_bg = 9\n", ""))
+    r = subprocess.run([BIN, "check", "-c", cfg_path, "--print"], capture_output=True, text=True, env={**os.environ, "SPILLWAY_CLUSTER_TOKEN": "env-cluster"})
+    check(r.returncode == 0 and "cluster.token vem de SPILLWAY_CLUSTER_TOKEN" in r.stdout and "env-cluster" not in r.stdout and "file-token" not in r.stdout, f"check passes, secrets hidden: {r.stdout[-400:]}")
+    open(cfg_path, "w").write(managed)  # the master starts anyway: the typo is only a warning there
+
+    env = {"SPILLWAY_CLUSTER_TOKEN": "env-cluster", "SPILLWAY_VALIDATE_TOKEN": "env-hook"}
+    stop_master()
+    start_master(extra_env=env)
+    st = api("/api/settings")
+    check(st["editable"] is False and not ov()["config_editable"], "panel told the config is read-only")
+    check({e["path"] for e in st["env"]} == {"cluster.token", "hooks.validate.token"}, f"env secrets reported: {st['env']}")
+    check(st["config"]["hooks"]["validate"]["token"] == "" and "hooks.validate.token" in st["secrets_set"], "hook token never sent to the browser")
+    check(st["config"]["cluster"]["token"] == "env-cluster", "cluster token from env is in effect")
+    locked = [
+        api_status("/api/settings", "PUT", {"ram": {"settle_secs": 2.0}}),
+        api_status("/api/destinations", "POST", {"id": "dx", "path": f"{LAB}/d3"}),
+        api_status("/api/destinations/d1", "PATCH", {"weight": 2}),
+        api_status("/api/destinations/d1", "DELETE"),
+    ]
+    check(locked == [403] * 4, f"every config change refused: {locked}")
+    check(api_status("/api/destinations/d1/probe", "POST") == 200, "operational actions still allowed")
+    check(any(e["code"] == "config_unknown_keys" for e in api("/api/events")), "unknown key warned in the panel")
+
+    # editable again, still with secrets from env: a panel save must not leak them into the file
+    open(cfg_path, "w").write(managed.replace("edit_config = false\n", "").replace("thief_max_bg = 9\n", ""))
+    stop_master()
+    start_master(extra_env=env)
+    check(api_status("/api/settings", "PUT", {"ram": {"settle_secs": 1.5}}) == 200, "panel edit accepted")
+    check(api_status("/api/settings", "PUT", {"hooks": {"validate": {"token": "x"}}}) == 400, "env-set secret not editable in the panel")
+    text = open(cfg_path).read()
+    check("settle_secs = 1.5" in text, "panel change persisted")
+    check("env-cluster" not in text and "env-hook" not in text and 'token = "file-token"' in text, "file keeps its own secrets, never the env ones")
+    stop_master()  # back to the plain lab for the next scenario
+    open(cfg_path, "w").write(base)
+    start_master()
+    return "check catches typos; edit_config=false locks every config change (probe still works); env secrets in effect, hidden from the browser and never written to the file"
+
+
 def s_master_crash():
     """kill -9 the master with files in RAM: on restart the spool is recovered and flushed."""
     api("/api/destinations/d1", "PATCH", {"enabled": False})
@@ -1069,6 +1125,7 @@ SCENARIOS = [
     ("extchanges", s_external_changes),
     ("fspanic", s_fs_panic),
     ("underlay", s_underlay_rescue),
+    ("deployconfig", s_deploy_config),
     ("crash", s_master_crash),
     ("stop", s_graceful_stop),
     ("hookvalidate", s_hook_validate),
