@@ -107,6 +107,19 @@ Cada node testa seus destinos a cada 2 s: diretório, `statvfs`, ponto de montag
 
 ## Instalação
 
+Binários prontos para Linux (x86_64 e arm64) saem em cada [release](https://github.com/WilianZilv/spillway/releases):
+
+```bash
+curl -fsSL https://github.com/WilianZilv/spillway/releases/latest/download/install.sh | sudo bash
+# opções: --version v0.2.0 · --role node · --enable
+```
+
+O script baixa o pacote da arquitetura, confere o SHA-256, instala `/usr/local/bin/spillway` e a unit systemd, e cria `/etc/spillway/spillway.toml` só se ainda não existir. Para integrar em outro software, os links fixos `releases/latest/download/spillway-linux-x86_64.tar.gz` (ou `-arm64`) e `SHA256SUMS` sempre apontam para a última versão. Requer `fuse3` no sistema.
+
+Publicar uma versão: suba a versão em `Cargo.toml`, faça o commit e envie a tag (`git tag v0.2.0 && git push origin v0.2.0`). O GitHub Actions testa, compila e publica.
+
+### A partir do código
+
 ```bash
 # painel (uma vez por mudança no web/)
 cd web && pnpm install && pnpm build && cd ..

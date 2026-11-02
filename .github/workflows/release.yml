@@ -1,0 +1,85 @@
+name: Release
+
+# Push a tag like v0.2.0 (matching Cargo.toml's version) to publish a release
+# with ready-to-run Linux binaries.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches Cargo.toml
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != Cargo.toml version $v"; exit 1; }
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Panel (embedded in the binary)
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
+      - name: Test and build
+        run: |
+          cargo test --release --locked
+          cargo build --release --locked
+          ./target/release/spillway check -c deploy/spillway.example.toml
+
+      - name: Package
+        run: |
+          name=spillway-linux-${{ matrix.arch }}
+          mkdir -p dist/$name
+          cp target/release/spillway dist/$name/
+          cp -r deploy dist/$name/
+          cp README.md install.sh dist/$name/
+          tar -C dist -czf dist/$name.tar.gz $name
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spillway-linux-${{ matrix.arch }}
+          path: dist/spillway-linux-${{ matrix.arch }}.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > SHA256SUMS
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp install.sh dist/
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS dist/install.sh \
+            --title "spillway $GITHUB_REF_NAME" --generate-notes --verify-tag
